@@ -27,11 +27,10 @@ fullFrameTracking = args.full_frame
 # Create pipeline ---
 print("Creating pipeline")
 pipeline = dai.Pipeline()
+camRgb = pipeline.create(dai.node.ColorCamera)
 
 # Define sources and outputs
 print("Defining sources and outputs")
-camRgb = pipeline.create(dai.node.ColorCamera)
-camRgb = pipeline.create(dai.node.ColorCamera)
 camRgb.setPreviewSize(300, 300)
 camRgb.setInterleaved(False)
 camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)
@@ -80,7 +79,7 @@ spatialDetectionNetwork.setBoundingBoxScaleFactor(0.5)
 spatialDetectionNetwork.setDepthLowerThreshold(100)
 spatialDetectionNetwork.setDepthUpperThreshold(5000)
 
-objectTracker.setDetectionLabelsToTrack([15])  # track only person
+objectTracker.setDetectionLabelsToTrack([5,9,15])  # track only person
 # possible tracking types: ZERO_TERM_COLOR_HISTOGRAM, ZERO_TERM_IMAGELESS, SHORT_TERM_IMAGELESS, SHORT_TERM_KCF
 objectTracker.setTrackerType(dai.TrackerType.ZERO_TERM_COLOR_HISTOGRAM)
 # take the smallest ID when new object is tracked, possible options: SMALLEST_ID, UNIQUE_ID
@@ -97,7 +96,8 @@ objectTracker.out.link(trackerOut.input)
 
 if fullFrameTracking:
     camRgb.setPreviewKeepAspectRatio(False)
-    camRgb.video.link(objectTracker.inputTrackerFrame)
+    #problem here with the .video notation
+    #camRgb.video.link(objectTracker.inputTrackerFrame)
     objectTracker.inputTrackerFrame.setBlocking(False)
     # do not block the pipeline if it's too slow on full frame
     objectTracker.inputTrackerFrame.setQueueSize(2)
@@ -125,27 +125,28 @@ nn.out.link(nnOut.input)
 
 # Connect to device and start pipeline
 print("connecting to device")
-with dai.Device(pipeline) as device:
+with dai.Device(pipeline, usb2Mode=True) as device:
     qFrames = device.getOutputQueue(name="frames")
     qPass = device.getOutputQueue(name="pass")
     qDet = device.getOutputQueue(name="nn")
 
     detections = []
     fps = FPSHandler()
-    text = TextHelper()
+    text = TextHelper() 
 
     preview = device.getOutputQueue("preview", 4, False)
     tracklets = device.getOutputQueue("tracklets", 4, False)
 
     startTime = time.monotonic()
     counter = 0
-    fps = 0
+    fps_1 = 0
     color = (255, 255, 255)
     # nn data (bounding box locations) are in <0..1> range - they need to be normalized with frame width/height
     def frameNorm(frame, bbox):
         normVals = np.full(len(bbox), frame.shape[0])
         normVals[::2] = frame.shape[1]
         return (np.clip(np.array(bbox), 0, 1) * normVals).astype(int)
+    
     def displayFrame(name, frame):
         for detection in detections:
             bbox = frameNorm(frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
@@ -162,7 +163,7 @@ with dai.Device(pipeline) as device:
         counter+=1
         current_time = time.monotonic()
 
-        frame = qFrames.get().getCvFrame()
+        frame = (qFrames.get()).getCvFrame()
 
         inDet = qDet.tryGet()
         if inDet is not None:
@@ -171,16 +172,19 @@ with dai.Device(pipeline) as device:
         inPass = qPass.tryGet()
 
         if (current_time - startTime) > 1 :
-            fps = counter / (current_time - startTime)
+            fps_1 = counter / (current_time - startTime)
             counter = 0
             startTime = current_time
+        
+        #this can turn on and off the passthrough box
         if inPass is not None:
             displayFrame('Passthrough', inPass.getCvFrame())
 
-        frame = imgFrame.getCvFrame()
+        # from here ↓
+        frame1 = imgFrame.getCvFrame()
         trackletsData = track.tracklets
         for t in trackletsData:
-            roi = t.roi.denormalize(frame.shape[1], frame.shape[0])
+            roi = t.roi.denormalize(frame1.shape[1], frame1.shape[0])
             x1 = int(roi.topLeft().x)
             y1 = int(roi.topLeft().y)
             x2 = int(roi.bottomRight().x)
@@ -191,18 +195,25 @@ with dai.Device(pipeline) as device:
             except:
                 label = t.label
 
-            cv2.putText(frame, str(label), (x1 + 10, y1 + 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
-            cv2.putText(frame, f"ID: {[t.id]}", (x1 + 10, y1 + 35), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
-            cv2.putText(frame, t.status.name, (x1 + 10, y1 + 50), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, cv2.FONT_HERSHEY_SIMPLEX)
+            cv2.putText(frame1, str(label), (x1 + 10, y1 + 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.putText(frame1, f"ID: {[t.id]}", (x1 + 10, y1 + 35), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.putText(frame1, t.status.name, (x1 + 10, y1 + 50), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.rectangle(frame1, (x1, y1), (x2, y2), color, cv2.FONT_HERSHEY_SIMPLEX)
 
-            cv2.putText(frame, f"X: {int(t.spatialCoordinates.x)} mm", (x1 + 10, y1 + 65), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
-            cv2.putText(frame, f"Y: {int(t.spatialCoordinates.y)} mm", (x1 + 10, y1 + 80), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
-            cv2.putText(frame, f"Z: {int(t.spatialCoordinates.z)} mm", (x1 + 10, y1 + 95), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            #here we can find the x y z quordinates
+            cv2.putText(frame1, f"X: {int(t.spatialCoordinates.x)} mm", (x1 + 10, y1 + 65), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.putText(frame1, f"Y: {int(t.spatialCoordinates.y)} mm", (x1 + 10, y1 + 80), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.putText(frame1, f"Z: {int(t.spatialCoordinates.z)} mm", (x1 + 10, y1 + 95), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
 
-        cv2.putText(frame, "NN fps: {:.2f}".format(fps), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color)
 
-        cv2.imshow("tracker", frame)
+        #turning these off turns off just the tracker display 
+        cv2.putText(frame1, "NN fps_1: {:.2f}".format(fps_1), (2, frame1.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color)
+
+        cv2.imshow("tracker", frame1)
+        #to here we can turn on and off the tracker module
+
+
+
         # Draw bounding boxes on high-res frame and show it
         text.putText(frame, "NN fps: {:.2f}".format(fps.fps()), (2, frame.shape[0] - 4))
         displayFrame("Frame", frame)
